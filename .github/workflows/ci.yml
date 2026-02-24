@@ -31,7 +31,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ${{ runner.os }}-ccache-${{ github.sha }}
+          key: ${{ runner.os }}-ccache-${{ hashFiles('**/*.cpp','**/*.h') }}
           restore-keys: |
             ${{ runner.os }}-ccache-
 
@@ -44,3 +44,8 @@ jobs:
       - name: Run clang-tidy
         run: |
            find src tests -name "*.cpp" | xargs clang-tidy -p build
+
+      - name: Run tests
+        run: |
+          cd build
+          ctest --output-on-failure

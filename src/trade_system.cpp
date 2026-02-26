@@ -52,6 +52,19 @@ void TradeSystem::handleOrder(const nlohmann::json &input) {
             sendToClient_(response);
         }
     } else {
+        // 纯撮合模式，首先发送确认回报
+        // 对于交易所前置模式，需要考虑情况，比如，如果需要转发至交易所，则应该等交易所的确认回报收到后再发给客户端。
+        if (!sendToExchange_ && sendToClient_) {
+            nlohmann::json response;
+            response["clOrderId"] = order.clOrderId;
+            response["market"] = to_string(order.market);
+            response["securityId"] = order.securityId;
+            response["side"] = to_string(order.side);
+            response["qty"] = order.qty;
+            response["price"] = order.price;
+            response["shareholderId"] = order.shareholderId;
+            sendToClient_(response);
+        }
         // 尝试撮合交易
         auto matchResult = matchingEngine_.match(order);
         if (matchResult.has_value()) {
@@ -129,18 +142,8 @@ void TradeSystem::handleOrder(const nlohmann::json &input) {
                     Order remainingOrder = order;
                     remainingOrder.qty = matchResult->remainingQty;
                     matchingEngine_.addOrder(remainingOrder);
-
-                    if (sendToClient_) {
-                        nlohmann::json confirmResponse;
-                        confirmResponse["clOrderId"] = order.clOrderId;
-                        confirmResponse["market"] = to_string(order.market);
-                        confirmResponse["securityId"] = order.securityId;
-                        confirmResponse["side"] = to_string(order.side);
-                        confirmResponse["qty"] = matchResult->remainingQty;
-                        confirmResponse["price"] = order.price;
-                        confirmResponse["shareholderId"] = order.shareholderId;
-                        sendToClient_(confirmResponse);
-                    }
+                    // 更新风控状态：剩余量入簿后需要被对敲检测追踪
+                    riskController_.onOrderAccepted(remainingOrder);
                 }
             }
         } else {
@@ -154,15 +157,6 @@ void TradeSystem::handleOrder(const nlohmann::json &input) {
             } else {
                 // 纯撮合系统：显式入订单簿，生成确认回报
                 matchingEngine_.addOrder(order);
-                nlohmann::json response;
-                response["clOrderId"] = order.clOrderId;
-                response["market"] = to_string(order.market);
-                response["securityId"] = order.securityId;
-                response["side"] = to_string(order.side);
-                response["qty"] = order.qty;
-                response["price"] = order.price;
-                response["shareholderId"] = order.shareholderId;
-                sendToClient_(response);
             }
             // 更新风控系统订单状态
             riskController_.onOrderAccepted(order);
@@ -189,27 +183,45 @@ void TradeSystem::handleCancel(const nlohmann::json &input) {
     }
 
     if (sendToExchange_) {
-        // 系统是交易所前置，转发给交易所
+        // 系统是交易所前置：转发交易所，等撤单确认后再从内部簿移除
         sendToExchange_(input);
     } else {
-        // 更新撮合引擎订单状态
+        // 纯撮合系统：从订单簿中移除
         CancelResponse result =
             matchingEngine_.cancelOrder(order.origClOrderId);
-        // 更新风控系统订单状态
-        riskController_.onOrderCanceled(order.origClOrderId);
-        // 纯撮合系统，生成撤单确认回报
-        nlohmann::json response;
-        response["clOrderId"] = result.clOrderId;
-        response["origClOrderId"] = result.origClOrderId;
-        response["market"] = to_string(result.market);
-        response["securityId"] = result.securityId;
-        response["shareholderId"] = result.shareholderId;
-        response["side"] = to_string(result.side);
-        response["qty"] = result.qty;
-        response["price"] = result.price;
-        response["cumQty"] = result.cumQty;
-        response["canceledQty"] = result.canceledQty;
-        sendToClient_(response);
+        if (result.type == CancelResponse::Type::REJECT) {
+            // 订单不在簿中（已完全成交或不存在）
+            if (sendToClient_) {
+                nlohmann::json response;
+                response["clOrderId"] = order.clOrderId;
+                response["origClOrderId"] = order.origClOrderId;
+                response["market"] = to_string(order.market);
+                response["securityId"] = order.securityId;
+                response["shareholderId"] = order.shareholderId;
+                response["side"] = to_string(order.side);
+                response["rejectCode"] = result.rejectCode;
+                response["rejectText"] = result.rejectText;
+                sendToClient_(response);
+            }
+        } else {
+            // 更新风控系统订单状态
+            riskController_.onOrderCanceled(order.origClOrderId);
+            // 生成撤单确认回报
+            if (sendToClient_) {
+                nlohmann::json response;
+                response["clOrderId"] = result.clOrderId;
+                response["origClOrderId"] = result.origClOrderId;
+                response["market"] = to_string(result.market);
+                response["securityId"] = result.securityId;
+                response["shareholderId"] = result.shareholderId;
+                response["side"] = to_string(result.side);
+                response["qty"] = result.qty;
+                response["price"] = result.price;
+                response["cumQty"] = result.cumQty;
+                response["canceledQty"] = result.canceledQty;
+                sendToClient_(response);
+            }
+        }
     }
 }
 
@@ -257,17 +269,36 @@ void TradeSystem::handleResponse(const nlohmann::json &input) {
                 resolvePendingMatch(activeOrderId);
             }
         } else {
-            // 普通撤单回报（用户主动撤单的确认），直接转发
+            // 普通撤单回报（用户主动撤单）
+            if (input.contains("rejectCode")) {
+                // 撤单被交易所拒绝：仅转发给客户端，不更新内部状态
+                if (sendToClient_) {
+                    sendToClient_(input);
+                }
+            } else {
+                // 撤单成功：更新风控和撮合引擎，并转发给客户端
+                riskController_.onOrderCanceled(origClOrderId);
+                matchingEngine_.cancelOrder(origClOrderId);
+                if (sendToClient_) {
+                    sendToClient_(input);
+                }
+            }
+        }
+    } else {
+        // 确认回报
+        std::string clOrderId = input.value("clOrderId", "");
+        auto confirmIt = pendingConfirms_.find(clOrderId);
+        if (confirmIt != pendingConfirms_.end()) {
+            // 剩余订单的交易所确认已收到
+            // → 向客户端发送原始订单的确认回报和内部成交回报
+            auto pc = std::move(confirmIt->second);
+            pendingConfirms_.erase(confirmIt);
+            sendConfirmAndExecReports(pc.activeOrder, pc.confirmedExecutions);
+        } else {
+            // 普通确认回报，直接转发给客户端
             if (sendToClient_) {
                 sendToClient_(input);
             }
-            // TODO: 更新风控状态
-            // riskController_.onOrderCanceled(origClOrderId);
-        }
-    } else {
-        // 确认回报等，直接转发给客户端
-        if (sendToClient_) {
-            sendToClient_(input);
         }
     }
 }
@@ -279,45 +310,16 @@ void TradeSystem::resolvePendingMatch(const std::string &activeOrderId) {
     auto &pending = it->second;
 
     uint32_t rejectedQty = 0;
-
-    // 对于撤单确认的部分，发送成交回报
     uint32_t confirmedQty = 0;
+    std::vector<OrderResponse> confirmedExecutions;
+
+    // 分类处理每笔撮合：已确认的记录下来，被拒的累计作废量
     for (const auto &exec : pending.executions) {
         if (pending.confirmedIds.count(exec.clOrderId)) {
             // 撤单确认 → 成交生效
             riskController_.onOrderExecuted(exec.clOrderId, exec.execQty);
             confirmedQty += exec.execQty;
-            if (sendToClient_) {
-                // 对手方（被动方）成交回报
-                nlohmann::json passiveResponse;
-                passiveResponse["clOrderId"] = exec.clOrderId;
-                passiveResponse["market"] = to_string(exec.market);
-                passiveResponse["securityId"] = exec.securityId;
-                passiveResponse["side"] = to_string(exec.side);
-                passiveResponse["qty"] = exec.qty;
-                passiveResponse["price"] = exec.price;
-                passiveResponse["shareholderId"] = exec.shareholderId;
-                passiveResponse["execId"] = exec.execId;
-                passiveResponse["execQty"] = exec.execQty;
-                passiveResponse["execPrice"] = exec.execPrice;
-                sendToClient_(passiveResponse);
-
-                // 主动方（taker）成交回报
-                nlohmann::json activeResponse;
-                activeResponse["clOrderId"] = pending.activeOrder.clOrderId;
-                activeResponse["market"] =
-                    to_string(pending.activeOrder.market);
-                activeResponse["securityId"] = pending.activeOrder.securityId;
-                activeResponse["side"] = to_string(pending.activeOrder.side);
-                activeResponse["qty"] = pending.activeOrder.qty;
-                activeResponse["price"] = pending.activeOrder.price;
-                activeResponse["shareholderId"] =
-                    pending.activeOrder.shareholderId;
-                activeResponse["execId"] = exec.execId;
-                activeResponse["execQty"] = exec.execQty;
-                activeResponse["execPrice"] = exec.execPrice;
-                sendToClient_(activeResponse);
-            }
+            confirmedExecutions.push_back(exec);
         } else {
             // 撤单被拒 → 该部分作废，累计未成交量
             rejectedQty += exec.execQty;
@@ -337,18 +339,76 @@ void TradeSystem::resolvePendingMatch(const std::string &activeOrderId) {
         remainingOrder.qty = totalUnfilledQty;
         // 入内部簿，供后续内部撮合
         matchingEngine_.addOrder(remainingOrder);
+
+        // 等待交易所确认后再向客户端发送确认回报和成交回报
+        PendingConfirm pc;
+        pc.activeOrder = pending.activeOrder;
+        pc.confirmedExecutions = std::move(confirmedExecutions);
+        pendingConfirms_[activeOrderId] = std::move(pc);
+
         if (sendToExchange_) {
             nlohmann::json newOrder = pending.activeOrderRawInput;
             newOrder["qty"] = totalUnfilledQty;
             // TODO: 可能需要生成新的 clOrderId
             sendToExchange_(newOrder);
         }
+    } else {
+        // 全部内部成交，无需等待交易所确认，直接发送确认和成交回报
+        sendConfirmAndExecReports(pending.activeOrder, confirmedExecutions);
     }
 
     // 主动方订单的风控状态更新
     riskController_.onOrderAccepted(pending.activeOrder);
 
     pendingMatches_.erase(it);
+}
+
+void TradeSystem::sendConfirmAndExecReports(
+    const Order &activeOrder, const std::vector<OrderResponse> &executions) {
+    if (!sendToClient_)
+        return;
+
+    // 主动方确认回报（原始订单完整数量）
+    nlohmann::json confirm;
+    confirm["clOrderId"] = activeOrder.clOrderId;
+    confirm["market"] = to_string(activeOrder.market);
+    confirm["securityId"] = activeOrder.securityId;
+    confirm["side"] = to_string(activeOrder.side);
+    confirm["qty"] = activeOrder.qty;
+    confirm["price"] = activeOrder.price;
+    confirm["shareholderId"] = activeOrder.shareholderId;
+    sendToClient_(confirm);
+
+    // 成交回报
+    for (const auto &exec : executions) {
+        // 对手方（被动方）成交回报
+        nlohmann::json passiveResponse;
+        passiveResponse["clOrderId"] = exec.clOrderId;
+        passiveResponse["market"] = to_string(exec.market);
+        passiveResponse["securityId"] = exec.securityId;
+        passiveResponse["side"] = to_string(exec.side);
+        passiveResponse["qty"] = exec.qty;
+        passiveResponse["price"] = exec.price;
+        passiveResponse["shareholderId"] = exec.shareholderId;
+        passiveResponse["execId"] = exec.execId;
+        passiveResponse["execQty"] = exec.execQty;
+        passiveResponse["execPrice"] = exec.execPrice;
+        sendToClient_(passiveResponse);
+
+        // 主动方（taker）成交回报
+        nlohmann::json activeResponse;
+        activeResponse["clOrderId"] = activeOrder.clOrderId;
+        activeResponse["market"] = to_string(activeOrder.market);
+        activeResponse["securityId"] = activeOrder.securityId;
+        activeResponse["side"] = to_string(activeOrder.side);
+        activeResponse["qty"] = activeOrder.qty;
+        activeResponse["price"] = activeOrder.price;
+        activeResponse["shareholderId"] = activeOrder.shareholderId;
+        activeResponse["execId"] = exec.execId;
+        activeResponse["execQty"] = exec.execQty;
+        activeResponse["execPrice"] = exec.execPrice;
+        sendToClient_(activeResponse);
+    }
 }
 
 } // namespace hdf

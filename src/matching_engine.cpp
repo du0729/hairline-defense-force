@@ -85,10 +85,10 @@ MatchingEngine::match(const Order &order,
                 break;
             }
 
-            // B10（可选）行情约束：如果有行情数据，买价不能高于行情卖价
+            // 行情约束：如果有行情数据，成交价不能高于行情卖价
             if (marketData.has_value()) {
-                if (order.price > marketData->askPrice &&
-                    marketData->askPrice > 0) {
+                if (marketData->askPrice > 0 &&
+                    askPrice > marketData->askPrice) {
                     break;
                 }
             }
@@ -177,10 +177,10 @@ MatchingEngine::match(const Order &order,
                 break;
             }
 
-            // B10（可选）行情约束：如果有行情数据，卖价不能低于行情买价
+            // 行情约束：如果有行情数据，成交价不能低于行情买价
             if (marketData.has_value()) {
-                if (order.price < marketData->bidPrice &&
-                    marketData->bidPrice > 0) {
+                if (marketData->bidPrice > 0 &&
+                    bidPrice < marketData->bidPrice) {
                     break;
                 }
             }

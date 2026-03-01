@@ -17,7 +17,7 @@ void TradeSystem::setSendToExchange(SendToExchange callback) {
 }
 
 void TradeSystem::handleOrder(const nlohmann::json &input) {
-     if (input.is_array()) {
+    if (input.is_array()) {
         handleMarketData(input);
         return;
     }
@@ -298,7 +298,7 @@ void TradeSystem::handleMarketData(const nlohmann::json &input) {
             continue;
         }
     }
-     // 前置模式下，将行情数据同步转发给交易所，
+    // 前置模式下，将行情数据同步转发给交易所，
     // 确保交易所侧的撮合也受相同的行情约束。
     if (sendToExchange_) {
         sendToExchange_(input);

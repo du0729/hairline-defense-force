@@ -620,7 +620,7 @@ TEST_F(GatewayTest, MultiplePendingMatches_DifferentSecurities) {
  * 场景：卖盘 9.0 和 10.0 两档，行情卖价 9.5，买入价 10.0
  * → 9.0 档正常成交，10.0 档被约束阻止
  */
-// TODO:
+
 TEST_F(GatewayTest, MarketDataConstraint_PartialMatch) {
     // 设置行情数据，以json array输入多个市场、股票的行情
     // XSHG市场的600030股票，卖价9.5，买价8.5，
@@ -655,9 +655,9 @@ TEST_F(GatewayTest, MarketDataConstraint_PartialMatch) {
             execCount++;
             EXPECT_EQ(resp["execQty"], 100);
         }
-//     }
-//     EXPECT_EQ(execCount, 2); // 被动方+主动方
-// }
+    }
+    EXPECT_EQ(execCount, 2); // 被动方+主动方
+}
 
 /**
  * @brief 多档卖盘部分撮合后遇到行情约束 —— 卖单先吃到高价档，然后被
@@ -666,7 +666,7 @@ TEST_F(GatewayTest, MarketDataConstraint_PartialMatch) {
  * 场景：买盘 9.0 和 10.0 两档，行情买价 9.5，卖出价 9.0
  * → 10.0 档正常成交，9.0 档被约束阻止
  */
-// TODO:
+
 TEST_F(GatewayTest, MarketDataConstraint_PartialMatch_Sell) {
     // 设置行情数据，以json array输入多个市场、股票的行情
     // XSHG市场的600030股票，买价9.5，卖价10.5，
@@ -701,9 +701,9 @@ TEST_F(GatewayTest, MarketDataConstraint_PartialMatch_Sell) {
             execCount++;
             EXPECT_EQ(resp["execQty"], 100);
         }
-//     }
-//     EXPECT_EQ(execCount, 2); // 被动方+主动方
-// }
+    }
+    EXPECT_EQ(execCount, 2); // 被动方+主动方
+}
 
 // ==================== PendingMatch: 全部确认 ====================
 

@@ -4,7 +4,6 @@
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
-#include <utility>
 
 namespace hdf {
 
@@ -109,9 +108,8 @@ inline void from_json(const nlohmann::json &j, CancelOrder &o) {
 }
 
 // 3.3 行情信息
+// 对于某个市场、某个证券代码的最新行情数据
 struct MarketData {
-    Market market;
-    std::string securityId;
     double bidPrice;
     double askPrice;
 };

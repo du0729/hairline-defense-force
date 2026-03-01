@@ -50,6 +50,11 @@ class TradeSystem {
      */
     void handleResponse(const nlohmann::json &input);
 
+    /**
+     * @brief 获取内部订单簿快照，返回买卖盘口价格档位。
+     */
+    nlohmann::json queryOrderbook() const;
+
   private:
     RiskController riskController_;
     MatchingEngine matchingEngine_;
@@ -86,9 +91,43 @@ class TradeSystem {
     std::unordered_map<std::string, std::string> cancelToActiveOrder_;
 
     /**
+     * 前置模式下，部分内部成交后剩余量转发给交易所时，
+     * 需要等待交易所的确认回报后再向客户端发送确认回报和成交回报。
+     */
+    struct PendingConfirm {
+        Order activeOrder;                              // 主动方原始订单
+        std::vector<OrderResponse> confirmedExecutions; // 已确认的内部成交
+    };
+
+    // key: 主动方订单的 clOrderId
+    std::unordered_map<std::string, PendingConfirm> pendingConfirms_;
+
+    /**
+     * 记录仅存在于内部订单簿而不在交易所的订单ID。
+     * 场景：内部撮合部分成交对手方后，交易所已全量撤单，
+     * 但对手方仍有剩余在内部簿。此时用户撤单应走本地路径。
+     */
+    std::unordered_set<std::string> localOnlyOrders_;
+
+    /**
+     * 记录不同市场不同证券的最新行情数据，用于更复杂的撮合逻辑
+     *
+     * key: market + securityId 的组合键，如：`XSHG+600030`
+     * value: 最新的 MarketData 结构体
+     */
+    std::unordered_map<std::string, MarketData> latestMarketData_;
+
+    /**
      * @brief 所有撤单回报都回来后，处理最终结果
      */
     void resolvePendingMatch(const std::string &activeOrderId);
+
+    /**
+     * @brief 向客户端发送确认回报和成交回报
+     */
+    void
+    sendConfirmAndExecReports(const Order &activeOrder,
+                              const std::vector<OrderResponse> &executions);
 };
 
 } // namespace hdf
